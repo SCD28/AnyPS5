@@ -168,6 +168,75 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
             paths.push_back(path);
         }
     }
+    std::set<std::string> searchedDependencies = missingNeeded;
+    while (true) {
+        std::set<std::string> wanted;
+        for (const auto& [path, image] : discovered) {
+            for (const auto& name : image.Dependencies) {
+                if (searchedDependencies.contains(name) || excludedModules.contains(name)) continue;
+                const auto stem = ModuleStem(name, windows);
+                const auto existing = std::find_if(discovered.begin(), discovered.end(), [&](const auto& entry) {
+                    const auto& [candidate, candidateImage] = entry;
+                    const auto candidateStem = ModuleStem(candidate.filename().string(), windows);
+                    return candidate.filename().string() == name || candidateImage.Soname == name ||
+                        (windows && foldFilename(candidate.filename().string()) == foldFilename(name)) ||
+                        (!stem.empty() && candidateStem == stem) ||
+                        matchesIdentity(name, candidateImage.ModuleNames);
+                });
+                if (existing == discovered.end()) wanted.insert(name);
+                else if (!stem.empty() && ModuleStem(existing->first.filename().string(), windows) == stem &&
+                         existing->first.filename().string() != name)
+                    neededAliases.emplace(name, existing->first);
+            }
+        }
+        if (wanted.empty()) break;
+        searchedDependencies.insert(wanted.begin(), wanted.end());
+
+        std::map<std::string, std::filesystem::path> found;
+        std::map<std::string, std::filesystem::path> foundByStem;
+        for (auto it = std::filesystem::recursive_directory_iterator(root); it != std::filesystem::recursive_directory_iterator(); ++it) {
+            const auto& path = it->path();
+            if (!it->is_regular_file() || path.filename().string().ends_with(GuestModuleSuffix) ||
+                excludedModules.contains(path.filename().string()) || !isElf(path)) continue;
+            const auto filename = path.filename().string();
+            for (const auto& name : wanted) {
+                const auto stem = ModuleStem(name, windows);
+                if (filename == name) {
+                    if (!found.emplace(name, path).second && found.at(name) != path)
+                        throw Domain::RelinkerException("Ambiguous needed module: " + found.at(name).string() + " and " + path.string());
+                } else if (!stem.empty() && ModuleStem(filename, windows) == stem) {
+                    if (!foundByStem.emplace(name, path).second && foundByStem.at(name) != path)
+                        throw Domain::RelinkerException("Ambiguous needed module: " + foundByStem.at(name).string() + " and " + path.string());
+                }
+            }
+        }
+        std::map<std::string, std::filesystem::path> identities;
+        for (auto it = std::filesystem::recursive_directory_iterator(root); it != std::filesystem::recursive_directory_iterator(); ++it) {
+            const auto& path = it->path();
+            const auto extension = path.extension().string();
+            if (!it->is_regular_file() || (extension != ".prx" && extension != ".sprx" && extension != ".suprx") ||
+                path.filename().string().ends_with(GuestModuleSuffix) || excludedModules.contains(path.filename().string()) ||
+                discovered.contains(path) || !isElf(path)) continue;
+            const auto names = GuestImageReader().ReadModuleNames(reader.Read(path.string()));
+            for (const auto& name : wanted) {
+                if (found.contains(name) || foundByStem.contains(name) || !matchesIdentity(name, names)) continue;
+                if (!identities.emplace(name, path).second && identities.at(name) != path)
+                    throw Domain::RelinkerException("Ambiguous needed module identity: " + name);
+            }
+        }
+        for (const auto& name : wanted) {
+            const auto match = found.find(name);
+            const auto byStem = foundByStem.find(name);
+            const auto identity = identities.find(name);
+            const auto selected = match != found.end() ? match->second : byStem != foundByStem.end() ? byStem->second :
+                identity != identities.end() ? identity->second : std::filesystem::path{};
+            if (selected.empty()) continue;
+            if (selected.filename().string() != name) neededAliases.emplace(name, selected);
+            if (discovered.contains(selected)) continue;
+            discovered.emplace(selected, GuestImageReader().Read(selected, reader.Read(selected.string())));
+            paths.push_back(selected);
+        }
+    }
     if (!unmatchedExclusions.empty()) throw Domain::RelinkerException("Excluded guest module file not found: " + *unmatchedExclusions.begin());
     std::sort(paths.begin(), paths.end());
     paths.erase(std::unique(paths.begin(), paths.end()), paths.end());

@@ -7,7 +7,21 @@ import tempfile
 
 from test_guest_module_directories import needed_libraries
 from test_guest_module_identity import declared_provider
-from test_windows_import_modules import executable
+from test_windows_import_modules import dynamic, executable
+
+
+def with_needed(image, name):
+    strings_size = struct.unpack_from('<Q', image, 0x618)[0]
+    image[0x800 + strings_size:0x800 + strings_size + len(name) + 1] = name.encode() + b'\0'
+    tags = []
+    for index in range(16):
+        tag = struct.unpack_from('<qQ', image, 0x600 + index * 16)
+        if tag[0] == 0:
+            break
+        tags.append((10, strings_size + len(name) + 1) if tag[0] == 10 else tag)
+    tags.append((1, strings_size))
+    dynamic(image, 0x600, 176, tags)
+    return image
 
 
 def main():
@@ -44,6 +58,41 @@ def main():
                 actual = needed_libraries(output.read_bytes())
                 expected = ['$ORIGIN/app0/' + relative + '.guest.prx']
                 assert actual == expected, (actual, expected)
+
+        for windows in (True, False):
+            root = with_needed(declared_provider(22, ('libGuest',)), 'libTransitive.prx')
+            transitive = declared_provider(11, ('libTransitive',), symbol='transitive')
+            result, output = convert(f'transitive-{windows}', windows, 'libGuest.suprx', {
+                'sce_module/root.prx': root,
+                'Media/Modules/libTransitive.prx': transitive,
+            })
+            assert result.returncode == 0, result.stderr
+            artifacts = set((output.parent / 'app0').rglob('*.guest.prx'))
+            assert artifacts == {
+                output.parent / 'app0/sce_module/root.prx.guest.prx',
+                output.parent / 'app0/Media/Modules/libTransitive.prx.guest.prx',
+            }, artifacts
+            if not windows:
+                child = output.parent / 'app0/sce_module/root.prx.guest.prx'
+                assert needed_libraries(output.read_bytes()) == [
+                    '$ORIGIN/app0/Media/Modules/libTransitive.prx.guest.prx',
+                    '$ORIGIN/app0/sce_module/root.prx.guest.prx',
+                ]
+                assert needed_libraries(child.read_bytes()) == ['$ORIGIN/../Media/Modules/libTransitive.prx.guest.prx']
+
+            if not windows:
+                root = with_needed(declared_provider(22, ('libGuest',)), 'libTransitive.prx')
+                transitive = with_needed(declared_provider(11, ('libTransitive',), symbol='transitive'), 'libHostOnly.so')
+                result, output = convert('transitive-host-library', False, 'libGuest.suprx', {
+                    'sce_module/root.prx': root,
+                    'Media/Modules/libTransitive.prx': transitive,
+                })
+                assert result.returncode == 0, result.stderr
+                assert needed_libraries(output.read_bytes()) == [
+                    '$ORIGIN/app0/Media/Modules/libTransitive.prx.guest.prx',
+                    '$ORIGIN/app0/sce_module/root.prx.guest.prx',
+                    'libHostOnly.so',
+                ]
 
         unsupported = declared_provider(77, ('libUnused',))
         struct.pack_into('<qQ', unsupported, 0x600 + 5 * 16, 0x70000000, 0)
