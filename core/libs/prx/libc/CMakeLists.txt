@@ -49,6 +49,15 @@ if(WIN32)
 endif()
 
 if(BUILD_TESTING)
+    add_test_executable(guest_allocation_exception_tests
+            ${LIBS_INCLUDE_DIR}/tests/GuestAllocationExceptionSafety.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/GuestAllocations.cpp)
+    target_include_directories(guest_allocation_exception_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_allocation_exception_tests PRIVATE ${CMAKE_DL_LIBS})
+    configure_windows_unwind(guest_allocation_exception_tests)
+    add_test(NAME guest_allocation_exception COMMAND guest_allocation_exception_tests)
+    set_tests_properties(guest_allocation_exception PROPERTIES TIMEOUT 10)
+
     add_test_executable(guest_time_conversion_tests ${LIBS_INCLUDE_DIR}/tests/GuestTimeConversion.cpp)
     target_include_directories(guest_time_conversion_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_time_conversion_tests PRIVATE libc)
